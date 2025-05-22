@@ -1,11 +1,10 @@
 import pandas as pd
 from neo4j import GraphDatabase
 
-# Connect to Neo4j
+# === 1. Connect to Neo4j and get PageRank scores ===
 url = 'neo4j://localhost:7687'
 driver = GraphDatabase.driver(url, auth=("neo4j", "test1234"))
 
-# PageRank query
 query = """
 CALL gds.pageRank.stream('ratingsGraph')
 YIELD nodeId, score
@@ -16,14 +15,13 @@ with driver.session() as session:
     result = session.run(query)
     records = [r.data() for r in result]
 
-# Convert to DataFrame
-df = pd.DataFrame(records)
+pagerank_df = pd.DataFrame(records)
 
-# Filter for Movie nodes only (skip User nodes)
-df = df[df['labels'].apply(lambda x: 'Movie' in x)].copy()
+# Filter only Movie nodes
+pagerank_df = pagerank_df[pagerank_df['labels'].apply(lambda x: 'Movie' in x)].copy()
 
-# --- Load Movie Metadata from u.item ---
-movie_info = pd.read_csv(
+# === 2. Load movie metadata ===
+movies_df = pd.read_csv(
     "data/raw/ml-100k/u.item",
     sep="|",
     encoding="latin-1",
@@ -32,12 +30,28 @@ movie_info = pd.read_csv(
     names=["movie_id", "title", "release_date"]
 )
 
-# Merge PageRank scores with movie metadata
-df_merged = df.merge(movie_info, how="left", left_on="id", right_on="movie_id")
+# === 3. Load ratings and compute count & avg rating per movie ===
+ratings_df = pd.read_csv(
+    "data/raw/ml-100k/u.data",
+    sep="\t",
+    names=["user", "movie", "rating", "timestamp"]
+)
 
-# Select and rename columns for clarity
-df_merged = df_merged[["id", "title", "release_date", "score"]]
-df_merged = df_merged.sort_values(by="score", ascending=False)
+rating_stats = ratings_df.groupby('movie').agg(
+    rating_count=('rating', 'count'),
+    avg_rating=('rating', 'mean')
+).reset_index()
 
-# Save the enriched results
-df_merged.to_csv("data/processed/pagerank_movie_scores.csv", index=False)
+# === 4. Merge all datasets ===
+# Merge PageRank with movie metadata
+merged = pagerank_df.merge(movies_df, how='left', left_on='id', right_on='movie_id')
+
+# Merge rating stats
+merged = merged.merge(rating_stats, how='left', left_on='id', right_on='movie')
+
+# Final columns cleanup
+final_df = merged[["id", "title", "release_date", "score", "rating_count", "avg_rating"]]
+final_df = final_df.sort_values(by="score", ascending=False)
+
+# === 5. Save enriched result ===
+final_df.to_csv("data/processed/pagerank_enriched.csv", index=False)
